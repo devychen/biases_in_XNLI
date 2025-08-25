@@ -1,0 +1,16 @@
+# 数据处理
+pandas==2.2.2
+numpy<2.0
+
+# 深度学习 (transformers for BERT)
+torch>=2.2.0
+transformers>=4.41.0
+
+# 中文分词（如果需要）
+jieba>=0.42.1
+
+# 统计分析
+scipy>=1.11.0
+
+# 可选：进度条
+tqdm>=4.66.0
