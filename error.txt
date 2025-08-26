@@ -1,0 +1,27 @@
+ERROR在 PyTorch + Transformers 的加载逻辑。
+
+从你报的错来看：
+
+ValueError: Due to a serious vulnerability issue in `torch.load`, even with `weights_only=True`, we now require users to upgrade torch to at least v2.6 in order to use the function.
+
+
+意思是：
+
+只要模型权重是 .bin (即 pickle 格式)，加载时就会走 torch.load；
+
+Hugging Face 因为安全漏洞（CVE-2025-32434），强制要求 PyTorch ≥ 2.6 才允许继续用 torch.load；
+
+你的环境 Torch 最高版本是 2.2.2（macOS arm64/Intel 上 PyPI 还没有 2.6），所以不满足要求。
+
+👉 结论：
+只要用 .bin 权重文件（大部分老中文模型都是 .bin），就一定会触发这个报错。换写法没用，必须：
+
+要么升级 torch ≥ 2.6（但你现在系统上还没有可安装的 2.6 版本）。
+
+要么换成 safetensors 权重（官方推荐的安全格式）。
+
+要么本地自己转换 .bin → .safetensors，再加载。
+
+⚡ 所以答案是：
+你但凡要跑 .bin 格式模型（如 hfl/chinese-macbert-base），就必须升级到 PyTorch 2.6 才能跑。
+如果你的系统装不到 2.6（目前 macOS 上确实还没放出来），那唯一的办法就是用 safetensors。

@@ -1,6 +1,8 @@
 # 数据处理
 pandas==2.2.2
 numpy<2.0
+matplotlib==3.10.5
+seaborn==0.13.2
 
 # 深度学习 (transformers for BERT)
 torch>=2.2.0
@@ -16,3 +18,5 @@ scipy>=1.11.0
 tqdm>=4.66.0
 
 pyyaml==6.0.2
+
+# pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
