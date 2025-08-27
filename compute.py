@@ -74,8 +74,8 @@ def main():
     t_stat, p_value = stats.ttest_ind(problem_ppl, clean_ppl, equal_var=False)
     print(f"Welch's t-test: t={t_stat:.3f}, p={p_value:.5f}")
 
-    clean_df.to_csv("xnli_zh_clean_dev_with_ppl.csv", index=False)
-    problem_df.to_csv("xnli_zh_problem_dev_with_ppl.csv", index=False)
+    clean_df.to_csv("output/xnli_zh_clean_dev_with_ppl.csv", index=False)
+    problem_df.to_csv("output/xnli_zh_problem_dev_with_ppl.csv", index=False)
 
 if __name__ == "__main__":
     main()
