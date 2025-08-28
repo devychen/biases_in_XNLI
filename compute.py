@@ -1,42 +1,106 @@
+# compute_length_controlled.py
+# 控制长度的情况下，检验 Clean vs Problem 的差异
+# 包含 sentence-level 和 pair-level 分析
+
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from scipy import stats
-import matplotlib.pyplot as plt
 import math
 import os
+import statsmodels.api as sm
+from scipy import stats
 
 # -----------------------------
-# 计算标准 perplexity
+# 计算每个句子的平均交叉熵 (per-token loss) 和 PPL
 # -----------------------------
-def standard_ppl(sentence, tokenizer, model, device="cpu"):
+def compute_sentence_loss(sentence, tokenizer, model, device="cpu"):
     model.eval()
     with torch.no_grad():
         encodings = tokenizer(sentence, return_tensors="pt")
         input_ids = encodings.input_ids.to(device)
         target_ids = input_ids.clone()
-        # 前向计算 log-likelihood
+
         outputs = model(input_ids, labels=target_ids)
-        # outputs.loss 是平均负对数似然 (cross-entropy)
-        loss = outputs.loss.item()
+        loss = outputs.loss.item()   # 平均 cross-entropy per token
         ppl = math.exp(loss)
-    return ppl
+    return loss, ppl, len(input_ids[0])
 
 # -----------------------------
-# 计算 dataset PPL 并打印进度
+# 对 dataset 计算
 # -----------------------------
-def compute_dataset_ppl(df, tokenizer, model, device="cpu", name="dataset"):
-    ppls = []
+def compute_dataset(df, tokenizer, model, device="cpu", name="dataset"):
+    losses, ppls, tokens = [], [], []
     total = len(df)
     for idx, row in df.iterrows():
-        ppl1 = standard_ppl(str(row["sentence1"]), tokenizer, model, device)
-        ppl2 = standard_ppl(str(row["sentence2"]), tokenizer, model, device)
-        avg_ppl = (ppl1 + ppl2) / 2
-        ppls.append(avg_ppl)
+        loss, ppl, length = compute_sentence_loss(str(row["sentence"]), tokenizer, model, device)
+        losses.append(loss)
+        ppls.append(ppl)
+        tokens.append(length)
         if (idx + 1) % 50 == 0 or (idx + 1) == total:
-            print(f"{name}: processed {idx+1}/{total} sentences")
+            print(f"{name}: processed {idx+1}/{total}")
+    df["loss"] = losses
     df["ppl"] = ppls
-    return df, ppls
+    df["tokens"] = tokens
+    return df
+
+# -----------------------------
+# 回归分析：loss ~ group + length
+# -----------------------------
+def regression_analysis(df, name="dataset"):
+    df = df.copy()
+    df["group_flag"] = df["group"].apply(lambda x: 1 if x == "Problem" else 0)
+
+    X = pd.DataFrame({
+        "group": df["group_flag"],
+        "length": df["tokens"]
+    })
+    X = sm.add_constant(X)
+    y = df["loss"]
+
+    # 加入 HC3 稳健标准误
+    model = sm.OLS(y, X).fit(cov_type="HC3")
+    print(f"\n=== OLS Regression for {name} (HC3 robust SE) ===")
+    print(model.summary())
+    return model
+
+
+# -----------------------------
+# Pair-level 构建
+# -----------------------------
+def build_pairs(df):
+    """
+    将句子按原始顺序 (sentence1, sentence2) 成对
+    假设数据是 extract_zh.py 得到的结构（两句一对）
+    """
+    pair_records = []
+    for i in range(0, len(df), 2):
+        if i+1 >= len(df):
+            break
+        s1 = df.iloc[i]
+        s2 = df.iloc[i+1]
+        avg_loss = (s1["loss"] + s2["loss"]) / 2
+        avg_ppl = (s1["ppl"] + s2["ppl"]) / 2
+        total_tokens = s1["tokens"] + s2["tokens"]
+        pair_records.append({
+            "loss": avg_loss,
+            "ppl": avg_ppl,
+            "tokens": total_tokens,
+            "group": s1["group"]  # 两个句子属于同一 group
+        })
+    return pd.DataFrame(pair_records)
+
+# -----------------------------
+# Welch's t-test
+# -----------------------------
+def t_test_by_group(df, value_col="ppl", name="dataset"):
+    clean_vals = df.loc[df["group"]=="Clean", value_col].dropna()
+    problem_vals = df.loc[df["group"]=="Problem", value_col].dropna()
+    t_stat, p_val = stats.ttest_ind(clean_vals, problem_vals, equal_var=False)
+    print(f"\n=== Welch's t-test for {name} ({value_col}) ===")
+    print(f"Clean mean={clean_vals.mean():.2f}, n={len(clean_vals)}")
+    print(f"Problem mean={problem_vals.mean():.2f}, n={len(problem_vals)}")
+    print(f"t={t_stat:.3f}, p={p_val:.5f}")
+
 
 # -----------------------------
 # 主函数
@@ -44,130 +108,46 @@ def compute_dataset_ppl(df, tokenizer, model, device="cpu", name="dataset"):
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained("uer/gpt2-chinese-cluecorpussmall")
-    model = AutoModelForCausalLM.from_pretrained("uer/gpt2-chinese-cluecorpussmall",
-                                                 use_safetensors=True).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        "uer/gpt2-chinese-cluecorpussmall",
+        use_safetensors=True
+    ).to(device)
 
-    # 确保 output 文件夹存在
     os.makedirs("output", exist_ok=True)
 
+    # 加载数据
     clean_df = pd.read_csv("data/xnli_zh_clean_dev.csv")
     problem_df = pd.read_csv("data/xnli_zh_problem_dev.csv")
 
-    print("计算 clean dataset PPL...")
-    clean_df, clean_ppl = compute_dataset_ppl(clean_df, tokenizer, model, device, "Clean dataset")
+    clean_df["group"] = "Clean"
+    problem_df["group"] = "Problem"
 
-    print("计算 problem dataset PPL...")
-    problem_df, problem_ppl = compute_dataset_ppl(problem_df, tokenizer, model, device, "Problem dataset")
+    all_df = pd.concat([clean_df, problem_df], ignore_index=True)
 
-    # 文字结果
-    print("=== 结果 ===")
-    print(f"Clean dataset: mean={sum(clean_ppl)/len(clean_ppl):.2f}, std={pd.Series(clean_ppl).std():.2f}, n={len(clean_ppl)}")
-    print(f"Problem dataset: mean={sum(problem_ppl)/len(problem_ppl):.2f}, std={pd.Series(problem_ppl).std():.2f}, n={len(problem_ppl)}")
+    # -------- Sentence-level --------
+    all_df = compute_dataset(all_df, tokenizer, model, device, "All sentences")
+    all_df.to_csv("output/all_with_loss.csv", index=False)
 
-    t_stat, p_value = stats.ttest_ind(problem_ppl, clean_ppl, equal_var=False)
-    print(f"Welch's t-test: t={t_stat:.3f}, p={p_value:.5f}")
+    print("\n=== Sentence-level descriptive statistics ===")
+    print(all_df.groupby("group")[["loss", "ppl", "tokens"]].mean())
 
-    # 保存 CSV
-    clean_df.to_csv("output/clean_ppl.csv", index=False)
-    problem_df.to_csv("output/problem_ppl.csv", index=False)
+    t_test_by_group(all_df, "ppl", "Sentence-level (ppl)")
+    t_test_by_group(all_df, "loss", "Sentence-level (loss)")
 
-    # # 可视化
-    # plt.figure(figsize=(8,5))
-    # plt.hist(clean_ppl, bins=50, alpha=0.7, label="Clean dataset")
-    # plt.hist(problem_ppl, bins=50, alpha=0.7, label="Problem dataset")
-    # plt.xlabel("Perplexity")
-    # plt.ylabel("Frequency")
-    # plt.title("PPL Distribution")
-    # plt.legend()
-    # plt.tight_layout()
-    # plt.savefig("output/ppl_distribution.png")
-    # plt.show()
+    regression_analysis(all_df, "Sentence-level")
+
+    # -------- Pair-level --------
+    pair_df = build_pairs(all_df)
+    pair_df.to_csv("output/all_pairs_with_loss.csv", index=False)
+
+    print("\n=== Pair-level descriptive statistics ===")
+    print(pair_df.groupby("group")[["loss", "ppl", "tokens"]].mean())
+
+    t_test_by_group(pair_df, "ppl", "Pair-level (ppl)")
+    t_test_by_group(pair_df, "loss", "Pair-level (loss)")
+
+    regression_analysis(pair_df, "Pair-level")
+
 
 if __name__ == "__main__":
     main()
-
-
-
-# # Pseudo PPL
-
-# import pandas as pd
-# import torch
-# from transformers import AutoTokenizer, AutoModelForMaskedLM
-# from scipy import stats
-# import math
-
-# # -----------------------------
-# # 计算 pseudo-perplexity
-# # -----------------------------
-# def pseudo_ppl(sentence, tokenizer, model, device="cpu"):
-#     model.eval()
-#     tokens = tokenizer.tokenize(sentence)
-#     if len(tokens) == 0:
-#         return None
-
-#     input_ids = tokenizer.encode(sentence, return_tensors="pt").to(device)
-#     nll = 0.0
-#     with torch.no_grad():
-#         for i in range(1, input_ids.size(1)-1):
-#             mask_input = input_ids.clone()
-#             mask_input[0, i] = tokenizer.mask_token_id
-#             outputs = model(mask_input)
-#             logits = outputs.logits
-#             softmax = torch.nn.functional.log_softmax(logits[0, i], dim=-1)
-#             token_id = input_ids[0, i]
-#             nll += -softmax[token_id].item()
-#     ppl = math.exp(nll / (input_ids.size(1)-2))
-#     return ppl
-
-# # -----------------------------
-# # 计算 dataset PPL 并打印进度
-# # -----------------------------
-# def compute_dataset_ppl(df, tokenizer, model, device="cpu", name="dataset"):
-#     ppls = []
-#     total = len(df)
-#     for idx, row in df.iterrows():
-#         ppl1 = pseudo_ppl(str(row["sentence1"]), tokenizer, model, device)
-#         ppl2 = pseudo_ppl(str(row["sentence2"]), tokenizer, model, device)
-#         if ppl1 is not None and ppl2 is not None:
-#             avg_ppl = (ppl1 + ppl2) / 2
-#         else:
-#             avg_ppl = None
-#         ppls.append(avg_ppl)
-#         if (idx + 1) % 50 == 0 or (idx + 1) == total:
-#             print(f"{name}: processed {idx+1}/{total} sentences")
-#     df["ppl"] = ppls
-#     return df, [x for x in ppls if x is not None]
-
-# # -----------------------------
-# # 主函数
-# # -----------------------------
-# def main():
-#     device = "cuda" if torch.cuda.is_available() else "cpu"
-#     tokenizer = AutoTokenizer.from_pretrained("hw2942/chinese-macbert-base-climate-related-prediction-vv5")
-#     model = AutoModelForMaskedLM.from_pretrained(
-#         "hw2942/chinese-macbert-base-climate-related-prediction-vv5",
-#         use_safetensors=True
-#     )
-#     model.to(device)
-
-#     clean_df = pd.read_csv("data/xnli_zh_clean_dev.csv")
-#     problem_df = pd.read_csv("data/xnli_zh_problem_dev.csv")
-
-#     print("计算 clean dataset PPL...")
-#     clean_df, clean_ppl = compute_dataset_ppl(clean_df, tokenizer, model, device, "Clean dataset")
-
-#     print("计算 problem dataset PPL...")
-#     problem_df, problem_ppl = compute_dataset_ppl(problem_df, tokenizer, model, device, "Problem dataset")
-
-#     print("=== 结果 ===")
-#     print(f"Clean dataset: mean={sum(clean_ppl)/len(clean_ppl):.2f}, std={pd.Series(clean_ppl).std():.2f}, n={len(clean_ppl)}")
-#     print(f"Problem dataset: mean={sum(problem_ppl)/len(problem_ppl):.2f}, std={pd.Series(problem_ppl).std():.2f}, n={len(problem_ppl)}")
-
-#     t_stat, p_value = stats.ttest_ind(problem_ppl, clean_ppl, equal_var=False)
-#     print(f"Welch's t-test: t={t_stat:.3f}, p={p_value:.5f}")
-
-#     clean_df.to_csv("output/xnli_zh_clean_dev_with_ppl.csv", index=False)
-#     problem_df.to_csv("output/xnli_zh_problem_dev_with_ppl.csv", index=False)
-
-# if __name__ == "__main__":
-#     main()
