@@ -1,6 +1,6 @@
 # A Perplexity-Based Analysis of Translation Artefacts in XNLI: Measuring Bias from Untranslated Tokens
 
-### Proposed Study: 
+# Proposal
 
 The study examines whether untranslated English terms (there’s a lot in the corpus) and name entities (e.g. “thanksgiving day”) in the XNLI’s non-English splits introduce biases when evaluating multi-lingual models, particularly for low-resource languages - and I choose Chinese for this study as a native speaker. And the hypothesis is that such terms increase sentence perplexity in targeted language (Chinese), and thus might artificially inflating model difficulty.
 
@@ -201,7 +201,7 @@ Welch’s t-test:
 
 回归（控制长度）：
 - `group` 系数 = 0.252, p<0.001 → Problem 组 pair-level loss 平均高 0.252
-- l`ength` 系数 = -0.011, p<0.001 → token 越多，loss 略下降
+- `length` 系数 = -0.011, p<0.001 → token 越多，loss 略下降
 
 #### 解读
 - 无论是否控制句子长度，Problem 组的 PPL / loss 都明显高于 Clean 组 → 支持假设：未翻译词或命名实体 人为提高了中文句子的语言模型困惑度。
